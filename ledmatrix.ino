@@ -7,19 +7,25 @@
 
 #include <FastLED.h>
 #include <math.h>
+#include <Servo.h>
+#include <WiFi.h>
+#include <ArduinoMqttClient.h>
+
+#include "aio.h"
 
 // How many leds in your strip?
 #define NUM_LEDS 64
 #define LED_STRIPS_LEDS 30
 
 // Pins
-#define DATA_PIN 0
+#define MATRIX_DATA_PIN 12
 #define INDICATOR_LED 16
 #define MODE_BUTTON 17
-#define PIEZO_PIN 15
+#define PIEZO_PIN 9
+#define STRIP_DATA_PIN 13
 
 // Task Delays
-#define INDICATOR_TASK_DELAY 100
+#define INDICATOR_TASK_DELAY 400
 #define MATRIX_TASK_DELAY 50
 #define PIEZO_TASK_DELAY 2500
 
@@ -69,7 +75,6 @@ uint8_t neutralFace[64] = {
 uint8_t* currentImage;
 
 #define MODE_COUNT 4
-
 enum DriveMode {
   Vroom,
   Calibrate,
@@ -87,15 +92,124 @@ static time_t delta;
 CRGB leds[NUM_LEDS];
 CRGB ledStrips[30];
 
+Servo motor1;
+Servo motor2;
+
+// Wi-Fi and MQTT
+WiFiClient wifiClient;
+MqttClient mqttClient(wifiClient);
+
+void mqttFaceChange(String message) {
+  if (message == "SAD") {
+    currentImage = sadFace;
+  } else if (message == "NEUTRAL") {
+    currentImage = neutralFace;
+  } else if (message == "HAPPY") {
+    currentImage = smileyFace;
+  }
+}
+
+void onMQTTMessage(int messageSize) {
+  // Only supports 255 chars + 1 NUL
+  char buf[256];
+  int i = 0;
+  while (mqttClient.available() && i < sizeof(buf) - 1) {
+    buf[i++] = (char)mqttClient.read();
+  }
+
+  buf[i] = '\0';
+
+  String message = String(buf);
+
+  Serial.print("MQTT Message: ");
+  Serial.println(message);
+
+  mqttFaceChange(message);
+}
+
+void initWifi() {
+  Serial.print("\nConnecting to network: ");
+  Serial.println(WIFI_SSID);
+  Serial.print("Key starting with: ");
+  Serial.println(WIFI_KEY[0]);
+  WiFi.begin(WIFI_SSID, WIFI_KEY);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(100);
+    digitalWrite(MQTT_LED, HIGH);
+    delay(100);
+    digitalWrite(MQTT_LED, LOW);
+
+    //
+    delay(800);
+  }
+
+  Serial.println("Welcome to the network! :)");
+
+  // MQTT still not ready
+  digitalWrite(MQTT_LED, LOW);
+}
+
+void initMqtt() {
+  pinMode(MQTT_LED, OUTPUT);
+
+  // Connect to Wi-Fi
+  initWifi();
+
+  Serial.println("Connecting to MQTT");
+
+  // It's MQTT'ing time
+  mqttClient.setId(MQTT_CLIENT_ID);
+  mqttClient.setUsernamePassword(IO_USERNAME, IO_KEY);
+
+  if (!mqttClient.connect(MQTT_BROKER, MQTT_PORT)) {
+    Serial.println("panic: Failed to connect to MQTT broker!");
+    while(true) {
+      tone(PIEZO_PIN, 5000, 100);
+      digitalWrite(MQTT_LED, HIGH);
+      delay(1000);
+      digitalWrite(MQTT_LED, LOW);
+      delay(500);
+    };
+  };
+
+  mqttClient.onMessage(onMQTTMessage);
+
+  if (mqttClient.subscribe(MQTT_FEED_TOPIC, 0)) {
+      Serial.println("Liked and subscribed to feed!");
+      digitalWrite(MQTT_LED, HIGH);
+  } else {
+      Serial.println("Failed to like and subscribe to feed.");
+      digitalWrite(MQTT_LED, LOW); // Continuing
+  }
+
+  Serial.println("Welcome to MQTT! :D");
+}
+
 void setup() {
-  currentImage = smileyFace;
-  FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, NUM_LEDS);
-  FastLED.addLeds<SK6812, 13, GRB>(ledStrips, LED_STRIPS_LEDS).setCorrection(TypicalLEDStrip);
+  Serial.begin(115200);
+  Serial.println("Hello World!");
+
+  // LEDs
+  FastLED.addLeds<WS2812B, MATRIX_DATA_PIN, GRB>(leds, NUM_LEDS);
+  FastLED.addLeds<SK6812, STRIP_DATA_PIN, GRB>(ledStrips, LED_STRIPS_LEDS).setCorrection(TypicalLEDStrip);
+
+  // Pins
   pinMode(INDICATOR_LED, OUTPUT);
   pinMode(MODE_BUTTON, INPUT_PULLDOWN);
   pinMode(PIEZO_PIN, OUTPUT);
-  Serial.begin(9600);
   attachInterrupt(digitalPinToInterrupt(MODE_BUTTON), modeButton, FALLING);
+  
+  // Motors
+  motor1.attach(1);
+  motor2.attach(2);
+  motor1.write(90); // STOP
+  motor2.write(90); // STOP
+
+  initMqtt();
+
+  currentImage = smileyFace;
 }
 
 void loop() {
@@ -107,6 +221,7 @@ void loop() {
   matrix();         // 8x8 LED matrix
   indicator_led();  // Status indicator LED
   piezo();          // Piezo Buzzer
+  iot();
 
   // END TASKS
 
@@ -133,6 +248,11 @@ void modeButton() {
   Serial.print("Mode: ");
   Serial.println(driveMode);
   interrupts();
+}
+
+// TASKS //
+void iot() {
+
 }
 
 void indicator_led() {
@@ -165,7 +285,7 @@ void piezo() {
     return;
   }
 
-  tone(PIEZO_PIN, 4200, 40);
+  tone(PIEZO_PIN, 3200, 40);
 
   // Task Footer
   piezoClock = 0;
